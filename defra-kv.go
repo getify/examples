@@ -215,9 +215,6 @@ func main() {
 	if err != nil {
 		die(&sil, "dnode.New: %v", err)
 	}
-	defer func() {
-		_ = n.Close(ctx)
-	}()
 
 	if err := n.Start(ctx); err != nil {
 		die(&sil, "n.Start: %v", err)
