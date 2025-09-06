@@ -44,7 +44,7 @@ func resolveRootdir(p string) string {
 		}
 	}
 	if err := os.MkdirAll(p, 0o755); err != nil {
-		log.Fatalf("create rootdir: %v", err)
+		log.Fatalf("create dataConfigDir: %v", err)
 	}
 	return p
 }
@@ -140,13 +140,13 @@ func die(s *fdSilencer, format string, a ...any) {
 func main() {
 	// Flags
 	fs := flag.NewFlagSet("defra-kv", flag.ExitOnError)
-	rootdir := fs.String("rootdir", defaultRootdir(), "Data/config directory")
-	secret  := fs.String("keyring-secret", "", "Keyring secret (sets DEFRA_KEYRING_SECRET)")
-	query   := fs.String("query", "", "GraphQL query/mutation")
+	dataConfigDir := fs.String("dir", defaultRootdir(), "Data/config directory")
+	secret := fs.String("keyring-secret", "", "Keyring secret (sets DEFRA_KEYRING_SECRET)")
+	query := fs.String("query", "", "GraphQL query/mutation")
 	varsStr := fs.String("vars", "", "JSON variables")
-	pretty  := fs.Bool("pretty", true, "Pretty-print JSON output")
-	reqTO   := fs.Duration("timeout", 10*time.Second, "Request timeout")
-	devMode := fs.Bool("dev", false, "enable development mode and verbose logging")
+	pretty := fs.Bool("pretty", true, "Pretty-print JSON output")
+	reqTO := fs.Duration("timeout", 10*time.Second, "Request timeout")
+	devMode := fs.Bool("dev", false, "Enable DefraDB development mode and verbose logging")
 	_ = fs.Parse(os.Args[1:])
 
 	// Keyring secret (first run convenience)
@@ -167,7 +167,7 @@ func main() {
 		q = strings.TrimSpace(string(b))
 	}
 	if q == "" {
-		fmt.Fprintln(os.Stderr, "no query provided; pass --query or pipe to stdin")
+		fmt.Fprintln(os.Stderr, "no query provided; pass -query or pipe to stdin")
 		os.Exit(2)
 	}
 
@@ -208,7 +208,7 @@ func main() {
 		dnode.WithDisableP2P(true),                    // local only
 		dnode.WithBadgerInMemory(false),               // persistent
 		dnode.WithStoreType(dnode.BadgerStore),
-		dnode.WithStorePath(resolveRootdir(*rootdir)), // data dir
+		dnode.WithStorePath(resolveRootdir(*dataConfigDir)), // data dir
 		dnode.WithLensRuntime(dnode.Wazero),           // pure-Go WASM runtime
 		dnode.WithEnableDevelopment(*devMode),         // toggle dev features/logging
 	)
