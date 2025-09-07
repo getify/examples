@@ -52,9 +52,9 @@ func resolveRootdir(p string) string {
 // Single JSON-based KV schema with indexes where useful.
 const kvSchema = `
 type KV {
-  key: String @index
-  value: JSON
-  updatedAt: DateTime @index
+	key: String @index(unique: true)
+	value: JSON
+	updatedAt: DateTime @index
 }
 `
 
@@ -107,6 +107,25 @@ func (s *fdSilencer) Mute() {
 	log.SetOutput(dn)
 
 	s.muted = true
+}
+
+func (s *fdSilencer) Restore() {
+	if !s.muted {
+		return
+	}
+	if s.origLogWriter != nil {
+		log.SetOutput(s.origLogWriter)
+	}
+	if s.origStdout != nil {
+		os.Stdout = s.origStdout
+	}
+	if s.origStderr != nil {
+		os.Stderr = s.origStderr
+	}
+	if s.devnull != nil {
+		_ = s.devnull.Close()
+	}
+	s.muted = false
 }
 
 func (s *fdSilencer) PrintlnOut(line string) {
