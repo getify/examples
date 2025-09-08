@@ -11,43 +11,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
 	dclient "github.com/sourcenetwork/defradb/client"
-	dnode   "github.com/sourcenetwork/defradb/node"
+	dnode "github.com/sourcenetwork/defradb/node"
 	"github.com/rs/zerolog"
 )
-
-func defaultRootdir() string {
-	if cwd, err := os.Getwd(); err == nil {
-		return filepath.Join(cwd, ".defra-kv")
-	}
-	return ".defra-kv"
-}
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if h, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(h, p[2:])
-		}
-	}
-	return p
-}
-
-func resolveRootdir(p string) string {
-	p = expandHome(p)
-	if !filepath.IsAbs(p) {
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
-		}
-	}
-	if err := os.MkdirAll(p, 0o755); err != nil {
-		log.Fatalf("create dataConfigDir: %v", err)
-	}
-	return p
-}
 
 // Single JSON-based KV schema with indexes where useful.
 const kvSchema = `
@@ -57,6 +29,25 @@ type KV {
 	updatedAt: DateTime @index
 }
 `
+
+var gqlNameRE = regexp.MustCompile(`^[_A-Za-z][_0-9A-Za-z]*$`)
+
+func defaultDataConfigDir() string {
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Join(cwd, ".defra-kv")
+	}
+	return ".defra-kv"
+}
+
+func resolveRootdir(p string) string {
+	if p == "" || p == "." {
+		p = defaultDataConfigDir()
+	}
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		log.Fatalf("create dataConfigDir: %v", err)
+	}
+	return p
+}
 
 func kvExists(ctx context.Context, n *dnode.Node) bool {
 	res := n.DB.ExecRequest(ctx, `query { __type(name: "KV") { name } }`)
@@ -109,32 +100,13 @@ func (s *fdSilencer) Mute() {
 	s.muted = true
 }
 
-func (s *fdSilencer) Restore() {
-	if !s.muted {
-		return
-	}
-	if s.origLogWriter != nil {
-		log.SetOutput(s.origLogWriter)
-	}
-	if s.origStdout != nil {
-		os.Stdout = s.origStdout
-	}
-	if s.origStderr != nil {
-		os.Stderr = s.origStderr
-	}
-	if s.devnull != nil {
-		_ = s.devnull.Close()
-	}
-	s.muted = false
-}
-
 func (s *fdSilencer) PrintlnOut(line string) {
 	if s != nil && s.origStdout != nil {
 		_, _ = s.origStdout.Write([]byte(line))
 		_, _ = s.origStdout.Write([]byte("\n"))
 		return
 	}
-	_, _ = os.Stdout.Write([]byte(line + "\n"))
+	fmt.Println(line)
 }
 
 func (s *fdSilencer) PrintlnErr(line string) {
@@ -143,7 +115,7 @@ func (s *fdSilencer) PrintlnErr(line string) {
 		_, _ = s.origStderr.Write([]byte("\n"))
 		return
 	}
-	_, _ = os.Stderr.Write([]byte(line + "\n"))
+	fmt.Fprintln(os.Stderr, line)
 }
 
 func die(s *fdSilencer, format string, a ...any) {
@@ -156,17 +128,72 @@ func die(s *fdSilencer, format string, a ...any) {
 	os.Exit(1)
 }
 
+// Convert a Go value (from JSON) into a GraphQL input literal string.
+// Supports: nil, bool, finite numbers, strings, arrays, and objects with GraphQL-Name keys.
+func toGraphQLLiteral(v any) (string, error) {
+	if v == nil {
+		return "null", nil
+	}
+	switch t := v.(type) {
+	case string:
+		b, _ := json.Marshal(t)
+		return string(b), nil
+	case bool:
+		if t {
+			return "true", nil
+		}
+		return "false", nil
+	case float64:
+		// JSON numbers decode to float64 and are finite by spec.
+		return fmt.Sprintf("%v", t), nil
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			lit, err := toGraphQLLiteral(e)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, lit)
+		}
+		return "[" + strings.Join(parts, ", ") + "]", nil
+	case map[string]any:
+		parts := make([]string, 0, len(t))
+		for k, val := range t {
+			if !gqlNameRE.MatchString(k) {
+				return "", fmt.Errorf("invalid GraphQL key: %q", k)
+			}
+			lit, err := toGraphQLLiteral(val)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, k+": "+lit)
+		}
+		return "{ " + strings.Join(parts, ", ") + " }", nil
+	default:
+		return "", fmt.Errorf("unsupported type in literal: %T", v)
+	}
+}
+
 func main() {
 	// Flags
 	fs := flag.NewFlagSet("defra-kv", flag.ExitOnError)
-	dataConfigDir := fs.String("dir", defaultRootdir(), "Data/config directory")
-	secret := fs.String("keyring-secret", "", "Keyring secret (sets DEFRA_KEYRING_SECRET)")
-	query := fs.String("query", "", "GraphQL query/mutation")
+	hasKey := fs.String("has", "", "Check key existence")
+	getKey := fs.String("get", "", "Get value by key")
+	setKey := fs.String("set", "", "Set/update value by key (value via stdin)")
+	removeKey := fs.String("remove", "", "Remove key/value")
 	varsStr := fs.String("vars", "", "JSON variables")
+	query := fs.String("query", "", "Raw GraphQL query/mutation")
 	pretty := fs.Bool("pretty", true, "Pretty-print JSON output")
 	reqTO := fs.Duration("timeout", 10*time.Second, "Request timeout")
+	dataConfigDir := fs.String("dir", defaultDataConfigDir(), "Data/config directory")
+	secret := fs.String("keyring-secret", "", "Keyring secret (sets DEFRA_KEYRING_SECRET)")
 	devMode := fs.Bool("dev", false, "Enable DefraDB development mode and verbose logging")
 	_ = fs.Parse(os.Args[1:])
+
+	// Determine mode: raw (-query) takes precedence over KV actions
+	hasAction := (
+		strings.TrimSpace(*query) == "" &&
+		(*setKey != "" || *getKey != "" || *hasKey != "" || *removeKey != ""))
 
 	// Keyring secret (first run convenience)
 	if *secret != "" {
@@ -176,25 +203,30 @@ func main() {
 		_ = os.Setenv("DEFRA_KEYRING_SECRET", "dev-dev-dev")
 	}
 
-	// Read query (flag or stdin)
-	q := strings.TrimSpace(*query)
-	if q == "" {
-		b, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			log.Fatalf("read stdin: %v", err)
+	// Read query (flag or stdin) for raw mode only
+	var q string
+	if !hasAction {
+		q = strings.TrimSpace(*query)
+		if q == "" {
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				log.Fatalf("read stdin: %v", err)
+			}
+			q = strings.TrimSpace(string(b))
 		}
-		q = strings.TrimSpace(string(b))
-	}
-	if q == "" {
-		fmt.Fprintln(os.Stderr, "no query provided; pass -query or pipe to stdin")
-		os.Exit(2)
+		if q == "" {
+			fmt.Fprintln(os.Stderr, "no query provided; pass -query or pipe to stdin")
+			os.Exit(2)
+		}
 	}
 
-	// Variables (optional)
+	// Variables (optional) for raw mode
 	var vars map[string]any
-	if v := strings.TrimSpace(*varsStr); v != "" {
-		if err := json.Unmarshal([]byte(v), &vars); err != nil {
-			log.Fatalf("parse -vars: %v", err)
+	if !hasAction {
+		if v := strings.TrimSpace(*varsStr); v != "" {
+			if err := json.Unmarshal([]byte(v), &vars); err != nil {
+				log.Fatalf("parse -vars: %v", err)
+			}
 		}
 	}
 
@@ -223,13 +255,13 @@ func main() {
 	// Create and start the node (embedded, persistent Badger)
 	n, err := dnode.New(
 		ctx,
-		dnode.WithDisableAPI(true),                    // no HTTP server
-		dnode.WithDisableP2P(true),                    // local only
-		dnode.WithBadgerInMemory(false),               // persistent
+		dnode.WithDisableAPI(true),                          // no HTTP server
+		dnode.WithDisableP2P(true),                          // local only
+		dnode.WithBadgerInMemory(false),                     // persistent
 		dnode.WithStoreType(dnode.BadgerStore),
 		dnode.WithStorePath(resolveRootdir(*dataConfigDir)), // data dir
-		dnode.WithLensRuntime(dnode.Wazero),           // pure-Go WASM runtime
-		dnode.WithEnableDevelopment(*devMode),         // toggle dev features/logging
+		dnode.WithLensRuntime(dnode.Wazero),                 // pure-Go WASM runtime
+		dnode.WithEnableDevelopment(*devMode),               // toggle dev features/logging
 	)
 	if err != nil {
 		die(&sil, "dnode.New: %v", err)
@@ -241,6 +273,68 @@ func main() {
 
 	if err := ensureKV(ctx, n); err != nil {
 		die(&sil, "ensure KV schema: %v", err)
+	}
+
+	// Build canned KV queries if in action mode
+	if hasAction {
+		var b []byte
+		var err error
+		vars = map[string]any{}
+		if *setKey != "" {
+			// Read value JSON from stdin
+			b, err = io.ReadAll(os.Stdin)
+			if err != nil {
+				die(&sil, "read stdin value: %v", err)
+			}
+			valStr := strings.TrimSpace(string(b))
+			if valStr == "" {
+				die(&sil, "no value on stdin for -set")
+			}
+			var val any
+			if err := json.Unmarshal([]byte(valStr), &val); err != nil {
+				die(&sil, "invalid JSON on stdin: %v", err)
+			}
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			vars["now"] = now
+			vars["key"] = *setKey
+
+			// Note: this style (passing in `value` as an external variable)
+			// does not currently work, due to a bug in defra
+			//
+			// vars["value"] = val
+			// q = `mutation setKV($key:String!,$value:JSON!,$now:DateTime!) {
+			// 	upsert_KV(
+			// 		filter: { key: { _eq: $key } }
+			// 		create: { key: $key, value: $value, updatedAt: $now }
+			// 		update: { value: $value, updatedAt: $now }
+			// 	) { _docID }
+			// }`
+
+			lit, err := toGraphQLLiteral(val)
+			if err != nil {
+				die(&sil, "value cannot be inlined: %v", err)
+			}
+			q = fmt.Sprintf(
+				`mutation setKV($key:String!,$now:DateTime!) {
+					upsert_KV(
+						filter: { key: { _eq: $key } }
+						create: { key: $key, value: %s, updatedAt: $now }
+						update: { value: %s, updatedAt: $now }
+					) { _docID }
+				}`,
+				lit,
+				lit,
+			)
+		} else if *getKey != "" {
+			vars["key"] = *getKey
+			q = "query getKV($key:String!) { KV(filter:{ key:{ _eq:$key } }) { key value } }"
+		} else if *hasKey != "" {
+			vars["key"] = *hasKey
+			q = "query hasKV($key:String!) { KV(filter:{ key:{ _eq:$key } }) { _docID } }"
+		} else if *removeKey != "" {
+			vars["key"] = *removeKey
+			q = "mutation removeKV($key:String!) { delete_KV(filter:{ key:{ _eq:$key } }) { _docID } }"
+		}
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, *reqTO)
@@ -262,16 +356,67 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Output JSON (with pretty-printing if specified)
-	var outBytes []byte
-	if *pretty {
-		outBytes, _ = json.MarshalIndent(map[string]any{"data": res.GQL.Data}, "", "  ")
+	// If using action mode, handle outputs/exit codes and return early
+	if hasAction {
+		m, _ := res.GQL.Data.(map[string]any)
+
+		// set
+		if *setKey != "" {
+			rows, _ := m["upsert_KV"].([]map[string]any)
+			if len(rows) > 0 {
+				os.Exit(0)
+			}
+			os.Exit(3)
+		}
+		// has
+		if *hasKey != "" {
+			rows, _ := m["KV"].([]map[string]any)
+			if len(rows) > 0 {
+				os.Exit(0)
+			}
+			os.Exit(3)
+		}
+		// del
+		if *removeKey != "" {
+			rows, _ := m["delete_KV"].([]map[string]any)
+			if len(rows) > 0 {
+				os.Exit(0)
+			}
+			os.Exit(3)
+		}
+		// get
+		if *getKey != "" {
+			rows, _ := m["KV"].([]map[string]any)
+
+			if len(rows) == 0 {
+				os.Exit(3)
+			}
+			doc := rows[0]
+			var outBytes []byte
+			if *pretty {
+				outBytes, _ = json.MarshalIndent(doc, "", "  ")
+			} else {
+				outBytes, _ = json.Marshal(doc)
+			}
+			if !*devMode {
+				sil.PrintlnOut(string(outBytes))
+			} else {
+				fmt.Println(string(outBytes))
+			}
+			os.Exit(0)
+		}
 	} else {
-		outBytes, _ = json.Marshal(map[string]any{"data": res.GQL.Data})
-	}
-	if !*devMode {
-		sil.PrintlnOut(string(outBytes))
-	} else {
-		fmt.Println(string(outBytes))
+		// Output JSON (with pretty-printing if specified) for raw mode
+		var outBytes []byte
+		if *pretty {
+			outBytes, _ = json.MarshalIndent(map[string]any{"data": res.GQL.Data}, "", "  ")
+		} else {
+			outBytes, _ = json.Marshal(map[string]any{"data": res.GQL.Data})
+		}
+		if !*devMode {
+			sil.PrintlnOut(string(outBytes))
+		} else {
+			fmt.Println(string(outBytes))
+		}
 	}
 }
