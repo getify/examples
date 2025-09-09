@@ -15,8 +15,8 @@ var fetch = require("node-fetch");
 
 var {
 	logError,
-	...localDefra
-} = require("./defra-client.js");
+	...defraKV
+} = require("./defra-kv.js");
 
 const MONGO_ENDPOINT = "mongodb://127.0.0.1:27017/?replicaSet=rs0";
 const LOG_MONGO = false;
@@ -41,23 +41,22 @@ main().catch(console.error);
 // *************************************
 
 async function main() {
-	localDefra.init();
+	defraKV.init();
 
 	try {
-    // NOTE: just temporary tests
-		var res = await localDefra.has("foo");
+		var res = await defraKV.has("foo");
 		console.log("has foo",res);
 
-		var res = await localDefra.set("foo",{ bar: 1 });
+		var res = await defraKV.set("foo",{ bar: 1 });
 		console.log("set",res);
 
-		var res = await localDefra.set("foo",{ bar: 2 });
+		var res = await defraKV.set("foo",{ bar: 2 });
 		console.log("set",res);
 
-		var res = await localDefra.get("foo");
+		var res = await defraKV.get("foo");
 		console.log("get",res);
 
-		var res = await localDefra.remove("foo");
+		var res = await defraKV.remove("foo");
 		console.log("remove",res);
 	}
 	catch (err) {
