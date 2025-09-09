@@ -128,52 +128,6 @@ func die(s *fdSilencer, format string, a ...any) {
 	os.Exit(1)
 }
 
-// Convert a Go value (from JSON) into a GraphQL input literal string.
-// Supports: nil, bool, finite numbers, strings, arrays, and objects with GraphQL-Name keys.
-func toGraphQLLiteral(v any) (string, error) {
-	if v == nil {
-		return "null", nil
-	}
-	switch t := v.(type) {
-	case string:
-		b, _ := json.Marshal(t)
-		return string(b), nil
-	case bool:
-		if t {
-			return "true", nil
-		}
-		return "false", nil
-	case float64:
-		// JSON numbers decode to float64 and are finite by spec.
-		return fmt.Sprintf("%v", t), nil
-	case []any:
-		parts := make([]string, 0, len(t))
-		for _, e := range t {
-			lit, err := toGraphQLLiteral(e)
-			if err != nil {
-				return "", err
-			}
-			parts = append(parts, lit)
-		}
-		return "[" + strings.Join(parts, ", ") + "]", nil
-	case map[string]any:
-		parts := make([]string, 0, len(t))
-		for k, val := range t {
-			if !gqlNameRE.MatchString(k) {
-				return "", fmt.Errorf("invalid GraphQL key: %q", k)
-			}
-			lit, err := toGraphQLLiteral(val)
-			if err != nil {
-				return "", err
-			}
-			parts = append(parts, k+": "+lit)
-		}
-		return "{ " + strings.Join(parts, ", ") + " }", nil
-	default:
-		return "", fmt.Errorf("unsupported type in literal: %T", v)
-	}
-}
-
 func main() {
 	// Flags
 	fs := flag.NewFlagSet("defra-kv", flag.ExitOnError)
@@ -297,34 +251,15 @@ func main() {
 			now := time.Now().UTC().Format(time.RFC3339Nano)
 			vars["now"] = now
 			vars["key"] = *setKey
+			vars["value"] = val
 
-			// Note: this style (passing in `value` as an external variable)
-			// does not currently work, due to a bug in defra
-			//
-			// vars["value"] = val
-			// q = `mutation setKV($key:String!,$value:JSON!,$now:DateTime!) {
-			// 	upsert_KV(
-			// 		filter: { key: { _eq: $key } }
-			// 		create: { key: $key, value: $value, updatedAt: $now }
-			// 		update: { value: $value, updatedAt: $now }
-			// 	) { _docID }
-			// }`
-
-			lit, err := toGraphQLLiteral(val)
-			if err != nil {
-				die(&sil, "value cannot be inlined: %v", err)
-			}
-			q = fmt.Sprintf(
-				`mutation setKV($key:String!,$now:DateTime!) {
-					upsert_KV(
-						filter: { key: { _eq: $key } }
-						create: { key: $key, value: %s, updatedAt: $now }
-						update: { value: %s, updatedAt: $now }
-					) { _docID }
-				}`,
-				lit,
-				lit,
-			)
+			q = `mutation setKV($key:String!,$value:JSON!,$now:DateTime!) {
+				upsert_KV(
+					filter: { key: { _eq: $key } }
+					create: { key: $key, value: $value, updatedAt: $now }
+					update: { value: $value, updatedAt: $now }
+				) { _docID }
+			}`
 		} else if *getKey != "" {
 			vars["key"] = *getKey
 			q = "query getKV($key:String!) { KV(filter:{ key:{ _eq:$key } }) { key value } }"
