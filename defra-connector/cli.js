@@ -4,6 +4,7 @@ process.on("uncaughtException",function(err){
 	console.log(err.stack);
 });
 
+var path = require("path");
 var util = require("util");
 var fs = require("fs/promises");
 
@@ -12,11 +13,7 @@ var { MongoClient, } = require("mongodb");
 var { createClient: GQLSSEClient, } = require("graphql-sse");
 // var ws = require("ws");
 var fetch = require("node-fetch");
-
-var {
-	logError,
-	...defraKV
-} = require("./defra-kv.js");
+var { ClassicLevel, } = require("classic-level");
 
 const MONGO_ENDPOINT = "mongodb://127.0.0.1:27017/?replicaSet=rs0";
 const LOG_MONGO = false;
@@ -24,6 +21,11 @@ const LOG_MONGO = false;
 // const DEFRA_WS_ENDPOINT = "ws://127.0.0.1:9181/api/v0/graphql";
 const DEFRA_SSE_ENDPOINT = "http://127.0.0.1:9181/api/v0/graphql";
 const LOG_DEFRA = false;
+
+var localKV = new ClassicLevel(
+	path.join(".",".local-kv"),
+	{ valueEncoding: "json", }
+);
 
 var mClient;
 var mEvents;
@@ -41,26 +43,24 @@ main().catch(console.error);
 // *************************************
 
 async function main() {
-	defraKV.init();
-
 	try {
-		var res = await defraKV.has("foo");
+		var res = await localKV.has("foo");
 		console.log("has foo",res);
 
-		var res = await defraKV.set("foo",{ bar: 1 });
-		console.log("set",res);
+		var res = await localKV.put("foo",{ bar: 1 });
+		console.log("put",res);
 
-		var res = await defraKV.set("foo",{ bar: 2 });
-		console.log("set",res);
+		var res = await localKV.put("foo",{ bar: 2 });
+		console.log("put",res);
 
-		var res = await defraKV.get("foo");
+		var res = await localKV.get("foo");
 		console.log("get",res);
 
-		var res = await defraKV.remove("foo");
-		console.log("remove",res);
+		var res = await localKV.del("foo");
+		console.log("del",res);
 	}
 	catch (err) {
-		logError(err);
+		console.error(err);
 	}
 
 
