@@ -18,7 +18,6 @@ import (
 
 	dclient "github.com/sourcenetwork/defradb/client"
 	dnode "github.com/sourcenetwork/defradb/node"
-	"github.com/rs/zerolog"
 )
 
 // Single JSON-based KV schema with indexes where useful.
@@ -71,15 +70,13 @@ func ensureKV(ctx context.Context, n *dnode.Node) error {
 	return nil
 }
 
-type fdSilencer struct {
+type errSilencer struct {
 	muted         bool
 	devnull       *os.File
-	origStdout    *os.File
 	origStderr    *os.File
-	origLogWriter io.Writer
 }
 
-func (s *fdSilencer) Mute() {
+func (s *errSilencer) Mute() {
 	if s.muted {
 		return
 	}
@@ -88,28 +85,15 @@ func (s *fdSilencer) Mute() {
 		return
 	}
 	s.devnull = dn
-	s.origStdout = os.Stdout
 	s.origStderr = os.Stderr
-	s.origLogWriter = log.Writer()
 
-	// redirect global stdio and stdlib logger
-	os.Stdout = dn
+	// redirect global stderr
 	os.Stderr = dn
-	log.SetOutput(dn)
 
 	s.muted = true
 }
 
-func (s *fdSilencer) PrintlnOut(line string) {
-	if s != nil && s.origStdout != nil {
-		_, _ = s.origStdout.Write([]byte(line))
-		_, _ = s.origStdout.Write([]byte("\n"))
-		return
-	}
-	fmt.Println(line)
-}
-
-func (s *fdSilencer) PrintlnErr(line string) {
+func (s *errSilencer) PrintlnErr(line string) {
 	if s != nil && s.origStderr != nil {
 		_, _ = s.origStderr.Write([]byte(line))
 		_, _ = s.origStderr.Write([]byte("\n"))
@@ -118,7 +102,7 @@ func (s *fdSilencer) PrintlnErr(line string) {
 	fmt.Fprintln(os.Stderr, line)
 }
 
-func die(s *fdSilencer, format string, a ...any) {
+func die(s *errSilencer, format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	if s != nil {
 		s.PrintlnErr(msg)
@@ -189,21 +173,12 @@ func main() {
 	defer stop()
 
 	// Configure logging based on dev mode
-	var sil fdSilencer
+	var sil errSilencer
 	if !*devMode {
-		// Environment-driven loggers used by Defra & deps
-		_ = os.Setenv("DEFRA_LOG_LEVEL", "error")
-		_ = os.Setenv("CORELOG_LEVEL", "error") // if corelog is present
-		_ = os.Setenv("GOLOG_LOG_LEVEL", "error")
-
-		// zerolog global level
-		zerolog.SetGlobalLevel(zerolog.Disabled)
-
-		// mute stdio
+		_ = os.Setenv("LOG_LEVEL", "error")
 		sil.Mute()
 	} else {
-		// allow all logs through
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		_ = os.Setenv("LOG_LEVEL", "info")
 	}
 
 	// Create and start the node (embedded, persistent Badger)
@@ -234,6 +209,7 @@ func main() {
 		var b []byte
 		var err error
 		vars = map[string]any{}
+
 		if *setKey != "" {
 			// Read value JSON from stdin
 			b, err = io.ReadAll(os.Stdin)
@@ -327,17 +303,15 @@ func main() {
 				os.Exit(3)
 			}
 			doc := rows[0]
+
 			var outBytes []byte
 			if *pretty {
 				outBytes, _ = json.MarshalIndent(doc, "", "  ")
 			} else {
 				outBytes, _ = json.Marshal(doc)
 			}
-			if !*devMode {
-				sil.PrintlnOut(string(outBytes))
-			} else {
-				fmt.Println(string(outBytes))
-			}
+
+			fmt.Println(string(outBytes))
 			os.Exit(0)
 		}
 	} else {
@@ -348,10 +322,8 @@ func main() {
 		} else {
 			outBytes, _ = json.Marshal(map[string]any{"data": res.GQL.Data})
 		}
-		if !*devMode {
-			sil.PrintlnOut(string(outBytes))
-		} else {
-			fmt.Println(string(outBytes))
-		}
+
+		fmt.Println(string(outBytes))
+		os.Exit(0)
 	}
 }
